@@ -1,4 +1,6 @@
-library(pointblank); library(arrow)
+library(pointblank)
+library(arrow)
+
 df <- arrow::read_parquet("data/processed/trafico_realtime.parquet")
 
 agent <- create_agent(df) |>
