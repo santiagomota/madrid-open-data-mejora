@@ -1,49 +1,98 @@
-library(DBI)
-library(duckdb)
-library(readr)
+# r/duckdb_example.R
+suppressPackageStartupMessages({
+    library(DBI)
+    library(duckdb)
+    library(readr)
+    library(fs)
+})
 
-# con <- dbConnect(duckdb::duckdb(), "../data/duckdb/madrid.duckdb")
+# ---------------------------
+# Configuración
+# ---------------------------
+anio <- "2025"
+mes  <- "07"   # 01..12
+duckdb_path <- "data/duckdb/madrid.duckdb"
+cache_dir   <- "data/raw/historico"
 
-# Podemos usar una base de datos en memoria (limitado por el tamaño de la misma)
-# driver_duckdb <- duckdb()
+# URL del ZIP mensual (formato MM-YYYY.zip)
+zip_url <- sprintf("https://datos.madrid.es/egobfiles/MANUAL/208627/%s-%s.zip", mes, anio)
 
-# O podemos hacerla persistente, lo que permite a DuckDB ejecutar procesos con
-# mas memoria de la que hay en RAM
-driver_duckdb <- duckdb(tempfile(fileext = ".duckdb"))
-driver_duckdb
+# Rutas locales
+dir_create(cache_dir)
+zip_local <- file.path(cache_dir, sprintf("%s-%s.zip", mes, anio))
 
-con_duck <- dbConnect(driver_duckdb)
-con_duck
+# Nombre de tabla en DuckDB
+tabla <- sprintf("trafico_%s_%s", anio, mes)
 
-# url <- "https://datos.madrid.es/egob/catalogo/202468-263-intensidad-trafico.csv"
+# ---------------------------
+# Descarga con caché
+# ---------------------------
+if (!file_exists(zip_local)) {
+    message("Descargando: ", zip_url)
+    download.file(zip_url, destfile = zip_local, mode = "wb", quiet = TRUE)
+} else {
+    message("Usando ZIP en caché: ", zip_local)
+}
 
-# df <- read_csv(url, show_col_types = FALSE)
+# ---------------------------
+# Extraer y detectar el CSV
+# ---------------------------
+tmpdir <- tempdir()
+files_in_zip <- unzip(zip_local, list = TRUE)
+# Si el ZIP contiene múltiples ficheros, cogemos el primero CSV
+csv_name <- files_in_zip$Name[grepl("\\.csv$", tolower(files_in_zip$Name))]
+if (length(csv_name) == 0) stop("El ZIP no contiene ningún CSV.")
+csv_name <- csv_name[1]
+csv_path <- unzip(zip_local, files = csv_name, exdir = tmpdir, overwrite = TRUE)
 
-fecha_objetivo <- data.frame(mes = '07', anio = '2025')
+message("CSV detectado en ZIP: ", basename(csv_path))
 
-directorio_externo <- "/media/enero/Disco3ATA/Varios/R/Archivos/GIS/data/"
+# ---------------------------
+# Lectura del CSV
+# - Separador ';'
+# - Decimal '.'
+# - Codificación: intentamos UTF-8 (ajustable si fuese necesario)
+# ---------------------------
+# Nota: si el fichero está en ISO-8859-1, usar locale(encoding = "Latin1")
+df <- read_delim(
+    file   = csv_path,
+    delim  = ";",
+    locale = locale(decimal_mark = ".", grouping_mark = "", encoding = "UTF-8"),
+    show_col_types = FALSE,
+    progress = FALSE
+)
 
-# Incluimos la url (este fichero corresponde a junio 2025)
-url <- paste0('https://datos.madrid.es/egobfiles/MANUAL/208627/', 
-              fecha_objetivo$mes[1], '-', fecha_objetivo$anio[1], '.zip')
+# Intento opcional de parseo de fecha/hora si existe columna "fecha" o similar
+posibles_fechas <- intersect(names(df), c("fecha", "Fecha", "FECHA", "fecha_hora", "datetime"))
+if (length(posibles_fechas) > 0) {
+    col_f <- posibles_fechas[1]
+    # Intento común: "YYYY-MM-DD HH:MM:SS" o similar
+    suppressWarnings({
+        df[[col_f]] <- parse_datetime(df[[col_f]], locale = locale(tz = "UTC"))
+    })
+}
 
-# La url
-# url
+# ---------------------------
+# Conexión DuckDB y carga
+# ---------------------------
+con <- dbConnect(duckdb::duckdb(), duckdb_path)
 
-# Definimos el fichero
-# fichero  <- paste0(tempfile(), ".zip")
-fichero <- paste0(directorio_externo, 'ayuntamientoMadrid/trafico/historico/', 
-                  fecha_objetivo$mes[1], '-', fecha_objetivo$anio[1], '.zip')
+on.exit({
+    try(dbDisconnect(con, shutdown = TRUE), silent = TRUE)
+})
 
-# Descargamos el fichero al ordenador (comprimido ocupa 72 Mb)
-download.file(url, destfile = fichero)
+# Crea/reescribe la tabla
+dbWriteTable(con, tabla, df, overwrite = TRUE, temporary = FALSE)
 
-# Leemos el fichero con la función read.table()
-# trafico_mes <- read.table(unzip(fichero, files = "06-2025.csv", exdir = tempdir()), 
-#                       header = TRUE, sep = ';', dec = '.')
-trafico_mes <- read.table(unzip(fichero, exdir = tempdir()), 
-                          header = TRUE, sep = ';', dec = '.')
+# Índice sobre fecha si existe
+if ("fecha" %in% names(df)) {
+    try(DBI::dbExecute(con, sprintf("CREATE INDEX IF NOT EXISTS idx_%s_fecha ON %s(fecha)", tabla, tabla)), silent = TRUE)
+} else if ("fecha_hora" %in% names(df)) {
+    try(DBI::dbExecute(con, sprintf("CREATE INDEX IF NOT EXISTS idx_%s_fecha_hora ON %s(fecha_hora)", tabla, tabla)), silent = TRUE)
+}
 
-dbWriteTable(con_duck, "trafico_mes", trafico_mes, overwrite = TRUE)
+# Verificación
+res <- dbGetQuery(con, sprintf("SELECT COUNT(*) AS filas FROM %s", tabla))
+print(res)
 
-print(dbGetQuery(con_duck, "SELECT COUNT(*) AS filas FROM trafico_mes"))
+message(sprintf("Tabla '%s' creada/actualizada en %s", tabla, duckdb_path))

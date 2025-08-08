@@ -1,7 +1,6 @@
-.venv/
-__pycache__/
-*.pyc
-data/processed/*.parquet
-data/duckdb/*.duckdb
-validation/reports/*
-.ipynb_checkpoints/
+data/
+!data/README.md
+*.duckdb
+*.zip
+*.parquet
+*.csv
