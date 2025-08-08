@@ -1,0 +1,60 @@
+name: validate
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Set up R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: '4.3'
+
+      - name: Install R packages
+        run: |
+          Rscript -e "install.packages(c('duckdb','DBI','readr','pointblank'), repos='https://cloud.r-project.org')"
+
+      - name: Create directories
+        run: |
+          mkdir -p data/raw data/processed data/duckdb sql
+
+      - name: Download July 2025 measurement points
+        run: |
+          curl -L "https://datos.madrid.es/egob/catalogo/202468-263-intensidad-trafico.csv" -o "data/raw/pmed_2025-07.csv"
+
+      - name: Ingest realtime XML -> Parquet -> DuckDB
+        run: |
+          python python/ingest_trafico_realtime.py
+
+      - name: Ingest measurement points CSV into DuckDB
+        run: |
+          duckdb data/duckdb/madrid.duckdb -c "CREATE OR REPLACE TABLE puntos_medida AS SELECT * FROM read_csv_auto('data/raw/pmed_2025-07.csv', SAMPLE_SIZE=-1);"
+
+      - name: Create views
+        run: |
+          duckdb data/duckdb/madrid.duckdb -c ".read sql/trafico_views.sql"
+
+      - name: Validate (R)
+        run: |
+          Rscript r/validate_trafico.R
+
+      - name: Validate (Python)
+        run: |
+          python python/validate_trafico.py

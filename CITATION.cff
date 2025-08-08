@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "Si usas este repositorio, por favor cita como se indica."
+title: "Proyecto de mejora del Portal de Datos Abiertos del Ayuntamiento de Madrid"
+authors:
+  - family-names: "Mota"
+    given-names: "Santiago"
+    orcid: ""
+date-released: "2025-08-08"
+version: "0.1.0"
+license: "MIT"
+repository-code: "https://github.com/santiagomota/madrid-open-data-mejora"
+keywords:
+  - open data
+  - duckdb
+  - madrid
+  - parquet
+  - reproducibility
