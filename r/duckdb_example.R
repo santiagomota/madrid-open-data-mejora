@@ -1,4 +1,9 @@
 # r/duckdb_example.R
+# ---------------------------------------------
+# Crear la base de datos (opcional, desde terminal):
+#   ./duckdb data/duckdb/madrid.duckdb
+# ---------------------------------------------
+
 suppressPackageStartupMessages({
     library(DBI)
     library(duckdb)
@@ -39,60 +44,78 @@ if (!file_exists(zip_local)) {
 # ---------------------------
 tmpdir <- tempdir()
 files_in_zip <- unzip(zip_local, list = TRUE)
-# Si el ZIP contiene múltiples ficheros, cogemos el primero CSV
 csv_name <- files_in_zip$Name[grepl("\\.csv$", tolower(files_in_zip$Name))]
 if (length(csv_name) == 0) stop("El ZIP no contiene ningún CSV.")
 csv_name <- csv_name[1]
 csv_path <- unzip(zip_local, files = csv_name, exdir = tmpdir, overwrite = TRUE)
-
 message("CSV detectado en ZIP: ", basename(csv_path))
 
 # ---------------------------
-# Lectura del CSV
-# - Separador ';'
-# - Decimal '.'
-# - Codificación: intentamos UTF-8 (ajustable si fuese necesario)
+# Conexión DuckDB
 # ---------------------------
-# Nota: si el fichero está en ISO-8859-1, usar locale(encoding = "Latin1")
-df <- read_delim(
-    file   = csv_path,
-    delim  = ";",
-    locale = locale(decimal_mark = ".", grouping_mark = "", encoding = "UTF-8"),
-    show_col_types = FALSE,
-    progress = FALSE
-)
-
-# Intento opcional de parseo de fecha/hora si existe columna "fecha" o similar
-posibles_fechas <- intersect(names(df), c("fecha", "Fecha", "FECHA", "fecha_hora", "datetime"))
-if (length(posibles_fechas) > 0) {
-    col_f <- posibles_fechas[1]
-    # Intento común: "YYYY-MM-DD HH:MM:SS" o similar
-    suppressWarnings({
-        df[[col_f]] <- parse_datetime(df[[col_f]], locale = locale(tz = "UTC"))
-    })
-}
-
-# ---------------------------
-# Conexión DuckDB y carga
-# ---------------------------
+dir_create(dirname(duckdb_path))
 con <- dbConnect(duckdb::duckdb(), duckdb_path)
-
 on.exit({
     try(dbDisconnect(con, shutdown = TRUE), silent = TRUE)
 })
 
-# Crea/reescribe la tabla
-dbWriteTable(con, tabla, df, overwrite = TRUE, temporary = FALSE)
+# ---------------------------
+# Opción A: lectura directa del CSV por DuckDB
+# (se evita pasar por data.frame en R)
+# ---------------------------
+path_escaped <- gsub("'", "''", normalizePath(csv_path, winslash = "/", mustWork = FALSE), fixed = TRUE)
 
-# Índice sobre fecha si existe
-if ("fecha" %in% names(df)) {
-    try(DBI::dbExecute(con, sprintf("CREATE INDEX IF NOT EXISTS idx_%s_fecha ON %s(fecha)", tabla, tabla)), silent = TRUE)
-} else if ("fecha_hora" %in% names(df)) {
-    try(DBI::dbExecute(con, sprintf("CREATE INDEX IF NOT EXISTS idx_%s_fecha_hora ON %s(fecha_hora)", tabla, tabla)), silent = TRUE)
-}
+sql_create <- sprintf(
+    "CREATE OR REPLACE TABLE %s AS
+   SELECT * FROM read_csv_auto('%s', delim=';', header=TRUE, sample_size=-1);",
+    tabla, path_escaped
+)
+DBI::dbExecute(con, sql_create)
 
+# ---------------------------
+# Workaround: crear columna temporal 'ts' y ordenar la tabla
+# (evita el bug del ART index y acelera consultas por rango con zone maps)
+# ---------------------------
+
+# Detectar columna temporal existente
+cols_df <- dbGetQuery(con, sprintf("PRAGMA table_info(%s);", tabla))
+cols <- cols_df$name
+time_col <- if ("fecha_hora" %in% cols) "fecha_hora" else if ("fecha" %in% cols) "fecha" else NA_character_
+if (is.na(time_col)) stop("No se encontró columna temporal ('fecha_hora' o 'fecha').")
+
+# Renombrar tabla actual a *_old
+DBI::dbExecute(con, sprintf("ALTER TABLE %s RENAME TO %s_old;", tabla, tabla))
+
+# Recrear tipando 'ts' con varios formatos comunes
+sql_with_ts <- sprintf("
+CREATE OR REPLACE TABLE %1$s AS
+SELECT
+  t.*,
+  COALESCE(
+    try_strptime(CAST(t.%2$s AS VARCHAR), '%%Y-%%m-%%d %%H:%%M:%%S'),
+    try_strptime(CAST(t.%2$s AS VARCHAR), '%%d/%%m/%%Y %%H:%%M:%%S'),
+    try_strptime(CAST(t.%2$s AS VARCHAR), '%%Y/%%m/%%d %%H:%%M:%%S'),
+    try_strptime(CAST(t.%2$s AS VARCHAR), '%%Y-%%m-%%dT%%H:%%M:%%S'),
+    try_strptime(CAST(t.%2$s AS VARCHAR), '%%d/%%m/%%Y')
+  ) AS ts
+FROM %1$s_old t;
+", tabla, time_col)
+DBI::dbExecute(con, sql_with_ts)
+
+# Ordenar físicamente por 'ts' para potenciar zone maps
+DBI::dbExecute(con, sprintf("
+  CREATE OR REPLACE TABLE %1$s AS
+  SELECT * FROM %1$s ORDER BY ts NULLS LAST;
+", tabla))
+
+# Limpieza: eliminar tabla antigua y checkpoint
+DBI::dbExecute(con, sprintf("DROP TABLE IF EXISTS %s_old;", tabla))
+DBI::dbExecute(con, "CHECKPOINT;")
+
+# ---------------------------
 # Verificación
-res <- dbGetQuery(con, sprintf("SELECT COUNT(*) AS filas FROM %s", tabla))
+# ---------------------------
+res <- dbGetQuery(con, sprintf("SELECT COUNT(*) AS filas, min(ts) AS ts_min, max(ts) AS ts_max FROM %s;", tabla))
 print(res)
 
-message(sprintf("Tabla '%s' creada/actualizada en %s", tabla, duckdb_path))
+message(sprintf("Tabla '%s' creada/actualizada y ordenada por ts en %s", tabla, duckdb_path))
