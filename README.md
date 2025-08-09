@@ -13,34 +13,25 @@
 
 Ejemplos de uso
 
-A) Procesar todo lo que ya existe en tmp_downloads (sin tocar la red):
+A. Procesar solo lo que ya está en tmp_downloads/ (sin descargas), manteniendo logs:
 
 python madrid_csv_to_parquet.py \
-  --from-tmp \
-  --tmp-dir tmp_downloads \
+  --start-url https://datos.madrid.es \
   --out-dir parquet_out \
+  --tmp-dir tmp_downloads \
   --inventory-csv inventario_madrid.csv \
   --skip-download \
   --verbose \
   --log-file logs/ejecucion_madrid.log
 
-B) Rastrear + descargar + convertir (flujo completo):
+B. Igual que antes pero borrando los archivos temporales tras convertir (si existían):
 
 python madrid_csv_to_parquet.py \
   --start-url https://datos.madrid.es \
   --out-dir parquet_out \
   --tmp-dir tmp_downloads \
   --inventory-csv inventario_madrid.csv \
-  --verbose \
-  --log-file logs/ejecucion_madrid.log
-
-C) Efímero (descarga, convierte y borra originales):
-
-python madrid_csv_to_parquet.py \
-  --start-url https://datos.madrid.es \
-  --out-dir parquet_out \
-  --tmp-dir tmp_downloads \
-  --inventory-csv inventario_madrid.csv \
+  --skip-download \
   --ephemeral \
   --verbose \
   --log-file logs/ejecucion_madrid.log
