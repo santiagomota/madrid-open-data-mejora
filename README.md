@@ -7,6 +7,8 @@
 - Abrir una página de Github.
 - Incorporar datos en Kaggle.
 
+**[madrid_csv_to_parquet.py](/media/enero/Disco3ATA/Varios/R/Archivos/datos_madrid/madrid_csv_to_parquet.py) para convertir todos los csv a parquet**
+
 [![CI](https://github.com/santiagomota/madrid-open-data-mejora/actions/workflows/validate.yml/badge.svg)](https://github.com/santiagomota/madrid-open-data-mejora/actions/workflows/validate.yml)
 
 **Autor:** Santiago Mota
