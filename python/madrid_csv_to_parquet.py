@@ -4,22 +4,29 @@
 """
 madrid_csv_to_parquet.py
 
-- Extrae URLs de un CSV de catálogo (aunque no tenga los enlaces directos).
-- Visita las páginas y descubre recursos .csv/.zip.
-- Descarga y convierte a Parquet.
-- Escribe un inventario con trazabilidad.
+- Descubre recursos .csv/.zip (vía catálogo o rastreo desde portada).
+- Convierte a Parquet de forma robusta (streaming para ficheros grandes).
+- Inventario de resultados con trazabilidad.
+- Logs a consola y (opcionalmente) a fichero (--log-file).
+- Modo efímero (--ephemeral): usar tmp-dir y borrar tras convertir (opcional).
+- NUEVO: --skip-download -> salta la descarga y convierte usando ficheros ya presentes en --tmp-dir.
+
+Casos de uso:
+1) Flujo completo (descargar + convertir)
+2) Solo convertir lo ya descargado en tmp-dir: usar --skip-download
+3) Efímero: descargar a tmp-dir, convertir y borrar originales: usar --ephemeral
 
 Requisitos:
-  pip install pandas pyarrow requests tqdm beautifulsoup4 chardet
+  pip install --upgrade pandas pyarrow fastparquet requests tqdm beautifulsoup4 chardet
 """
 
 import argparse
 import csv as csv_std
 import hashlib
-import os
-import re
 import sys
 import zipfile
+import re
+import logging
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import List
@@ -37,9 +44,13 @@ from tqdm import tqdm
 
 SESSION = requests.Session()
 SESSION.headers.update({
-    "User-Agent": "AytoMadrid-CSV2Parquet-Proposal/1.1 (+contacto-proponente)"
+    "User-Agent": "AytoMadrid-CSV2Parquet-Proposal/1.5 (+contacto-proponente)"
 })
 TIMEOUT = 60
+VERBOSE = False
+EPHEMERAL = False         # Si True, borra originales tras convertir
+SKIP_DOWNLOAD = False     # Si True, no descarga: busca ficheros en tmp-dir y convierte
+log = logging.getLogger(__name__)  # se configura en main()
 
 
 # ---------------------------
@@ -58,7 +69,7 @@ class ResourceRow:
     sha256: str = ""
     local_path: str = ""
     parquet_path: str = ""
-    status: str = "pending"  # pending, downloaded, converted, error
+    status: str = "pending"  # pending, downloaded, converted, error, missing_local
     note: str = ""
 
 
@@ -146,7 +157,6 @@ def load_catalog(catalog_csv: Path) -> List[ResourceRow]:
         enc = "utf-8"
 
     text = raw.decode(enc, errors="replace")
-
     any_url_pattern = re.compile(r'(https?://[^\s"\'<>]+)', re.IGNORECASE)
 
     rows: List[ResourceRow] = []
@@ -168,6 +178,7 @@ def load_catalog(catalog_csv: Path) -> List[ResourceRow]:
                 format=guess_format_from_url(u)  # la mayoría serán UNKNOWN aquí
             )
             rows.append(rr)
+    log.info(f"[CAT] URLs detectadas en catálogo: {len(rows)} (únicas: {len(seen)})")
     return rows
 
 
@@ -196,7 +207,6 @@ def extract_csv_zip_from_pages(pages: List[ResourceRow], same_host=True, max_per
 
             soup = BeautifulSoup(resp.text, "html.parser")
 
-            # Candidatos a recursos
             links = soup.select("a[href]")
             count = 0
             for a in links:
@@ -221,8 +231,11 @@ def extract_csv_zip_from_pages(pages: List[ResourceRow], same_host=True, max_per
                     if count >= max_per_page:
                         break
 
-        except Exception:
-            # Ignorar errores de una página y continuar
+            if VERBOSE:
+                log.debug(f"[PAGE] {url} -> {count} recursos CSV/ZIP")
+
+        except Exception as e:
+            log.debug(f"[PAGE-ERR] {url}: {e}")
             continue
 
     # De-duplicar
@@ -287,7 +300,8 @@ def crawl_for_links(start_url: str, max_pages: int = 2000, same_host=True) -> Li
                 if abs_url not in seen:
                     queue.append(abs_url)
 
-        except Exception:
+        except Exception as e:
+            log.debug(f"[CRAWL-ERR] {url}: {e}")
             continue
 
     pbar.close()
@@ -295,59 +309,136 @@ def crawl_for_links(start_url: str, max_pages: int = 2000, same_host=True) -> Li
     unique = {}
     for r in out:
         unique[r.url] = r
+    log.info(f"[CRAWL] Enlaces CSV/ZIP encontrados: {len(unique)}")
     return list(unique.values())
 
 
 # ---------------------------
-# 4) Conversión CSV -> Parquet
+# 4) Conversión CSV -> Parquet (robusta, con streaming)
 # ---------------------------
 
-def convert_csv_file_to_parquet(csv_path: Path, parquet_path: Path, sample_bytes: int = 256_000):
+def convert_csv_file_to_parquet(csv_path: Path, parquet_path: Path, sample_bytes: int = 512_000, verbose: bool = False):
+    """
+    Conversión robusta:
+    - Detecta codificación (incluye UTF-16).
+    - Sniffer de delimitador y fallback.
+    - on_bad_lines='skip' para filas corruptas.
+    - Modo "streaming" con chunks si el archivo es grande (> ~200MB).
+    - Fallback a fastparquet si no hay pyarrow.
+    """
     ensure_dir(parquet_path.parent)
 
-    # Detectar encoding + delimitador con una muestra
+    # Detectar codificación + delimitador con una muestra
     with open(csv_path, "rb") as f:
         sample = f.read(sample_bytes)
     encoding = detect_encoding(sample)
+    if "UTF-16" in encoding.upper():
+        encoding = "utf-16"
     dialect, _ = sniff_dialect(sample)
 
-    # Lectura robusta con pandas
+    # Elegir motor parquet
+    parquet_engine = None
     try:
-        df = pd.read_csv(
-            csv_path,
-            encoding=encoding,
-            sep=getattr(dialect, "delimiter", ";"),
-            quotechar=getattr(dialect, "quotechar", '"'),
-            engine="python",  # tolerante
-            dtype_backend="pyarrow",
-            low_memory=False
-        )
+        import pyarrow  # noqa: F401
+        parquet_engine = "pyarrow"
     except Exception:
-        # Segundo intento con separador común
-        df = pd.read_csv(
-            csv_path,
-            encoding=encoding,
-            sep=";",
-            engine="python",
-            dtype_backend="pyarrow",
-            low_memory=False
-        )
+        try:
+            import fastparquet  # noqa: F401
+            parquet_engine = "fastparquet"
+        except Exception:
+            raise RuntimeError("No se encontró ni 'pyarrow' ni 'fastparquet'. Instale uno: pip install pyarrow")
 
-    # Escribir Parquet
-    df.to_parquet(parquet_path, engine="pyarrow", compression="snappy", index=False)
+    # Heurística de tamaño para decidir streaming
+    file_size = csv_path.stat().st_size
+    streaming = file_size > 200 * 1024 * 1024  # >200MB
 
+    if verbose:
+        log.debug(f"[CONVERT] {csv_path.name} -> {parquet_path.name} | enc={encoding} sep={getattr(dialect,'delimiter',';')} size={file_size/1e6:.1f}MB engine={parquet_engine} streaming={streaming}")
+
+    # Parámetros comunes de lectura
+    read_kwargs = dict(
+      encoding=encoding,
+      sep=getattr(dialect, "delimiter", ";"),
+      quotechar=getattr(dialect, "quotechar", '"'),
+      engine="python",
+      low_memory=False,
+      on_bad_lines="skip"
+    )
+
+    # Fallbacks si falla la lectura directa
+    def read_full():
+        try:
+            return pd.read_csv(csv_path, **read_kwargs)
+        except Exception:
+            for enc_try in [encoding, "latin1", "utf-8", "utf-16"]:
+                for sep_try in [read_kwargs["sep"], ";", ",", "\t", "|"]:
+                    try:
+                        return pd.read_csv(
+                            csv_path,
+                            encoding=enc_try,
+                            sep=sep_try,
+                            engine="python",
+                            low_memory=False,
+                            on_bad_lines="skip"
+                        )
+                    except Exception:
+                        continue
+            raise
+
+    def read_stream_and_write():
+        if parquet_engine == "pyarrow":
+            import pyarrow as pa
+            import pyarrow.parquet as pq
+            writer = None
+            try:
+                for chunk in pd.read_csv(csv_path, chunksize=200_000, **read_kwargs):
+                    table = pa.Table.from_pandas(chunk, preserve_index=False)
+                    if writer is None:
+                        writer = pq.ParquetWriter(parquet_path, table.schema, compression="snappy")
+                    writer.write_table(table)
+                if writer:
+                    writer.close()
+            finally:
+                if writer:
+                    try:
+                        writer.close()
+                    except Exception:
+                        pass
+        else:
+            first = True
+            for chunk in pd.read_csv(csv_path, chunksize=200_000, **read_kwargs):
+                if first:
+                    chunk.to_parquet(parquet_path, engine="fastparquet", compression="snappy", index=False)
+                    first = False
+                else:
+                    chunk.to_parquet(parquet_path, engine="fastparquet", compression="snappy", index=False, append=True)
+
+    if not streaming:
+        df = read_full()
+        try:
+            df.to_parquet(parquet_path, engine=parquet_engine, compression="snappy", index=False)
+        except Exception as e:
+            if verbose:
+                log.debug(f"[WARN] to_parquet directo falló: {e}. Reintentando streaming…")
+            read_stream_and_write()
+    else:
+        read_stream_and_write()
+
+
+# ---------------------------
+# 5) Proceso de cada recurso
+# ---------------------------
 
 def process_resource(rr: ResourceRow, out_dir: Path, tmp_dir: Path, overwrite=False) -> ResourceRow:
-    rr = ResourceRow(**asdict(rr))  # copiar
+    """
+    - Si SKIP_DOWNLOAD=True: no descarga; usa el fichero en tmp_dir según el nombre derivado de la URL.
+      * Si no existe -> status='missing_local'.
+    - Si SKIP_DOWNLOAD=False: descarga (a tmp_dir), salvo que exista y no se pida --overwrite.
+    - Si EPHEMERAL=True y hay descarga: borra originales tras convertir.
+      (Si SKIP_DOWNLOAD=True se ignora EPHEMERAL: nunca se borran locales).
+    """
+    rr = ResourceRow(**asdict(rr))  # copia defensiva
     try:
-        status = head_status(rr.url)
-        rr.http_status = status
-        if status and status >= 400:
-            rr.status = "error"
-            rr.note = f"HTTP {status}"
-            return rr
-
-        # Nombre base a partir de la URL
         parsed = urlparse(rr.url)
         base = safe_filename(Path(parsed.path).name or "recurso")
         if not base:
@@ -356,50 +447,108 @@ def process_resource(rr: ResourceRow, out_dir: Path, tmp_dir: Path, overwrite=Fa
             base += ".csv"
         local_path = tmp_dir / base
 
-        if not local_path.exists() or overwrite:
-            size, sha = download(rr.url, local_path)
-            rr.bytes = size
-            rr.sha256 = sha
-            rr.status = "downloaded"
-        else:
-            rr.status = "downloaded (cached)"
+        # 1) Gestión de descarga según flag
+        if SKIP_DOWNLOAD:
+            # No descargar, sólo usar lo que haya en tmp-dir
+            if not local_path.exists():
+                rr.status = "missing_local"
+                rr.note = "skip-download: archivo no encontrado en tmp-dir"
+                rr.local_path = ""
+                return rr
+            rr.status = "downloaded (existing)"
             rr.bytes = local_path.stat().st_size
+            rr.local_path = str(local_path)
+            rr.http_status = 0  # no consultamos red
+        else:
+            # Descarga normal con HEAD opcional
+            status = head_status(rr.url)
+            rr.http_status = status
+            if status and status >= 400:
+                rr.status = "error"
+                rr.note = f"HTTP {status}"
+                return rr
 
-        rr.local_path = str(local_path)
+            need_download = (not local_path.exists()) or overwrite
+            if need_download:
+                if VERBOSE:
+                    log.debug(f"[DL] {rr.url}")
+                size, sha = download(rr.url, local_path)
+                rr.bytes = size
+                rr.sha256 = sha
+                rr.status = "downloaded"
+            else:
+                rr.status = "downloaded (cached)"
+                rr.bytes = local_path.stat().st_size
 
-        # Convertir
+            rr.local_path = str(local_path)
+
+        def _cleanup_file(p: Path):
+            try:
+                if p.exists():
+                    p.unlink()
+            except Exception:
+                pass
+
+        # 2) Conversión
         if rr.format == "CSV":
             parquet_name = safe_filename(base.replace(".csv", "").replace(".CSV", "")) + ".parquet"
             parquet_path = out_dir / parquet_name
-            convert_csv_file_to_parquet(local_path, parquet_path)
-            rr.parquet_path = str(parquet_path)
-            rr.status = "converted"
+            try:
+                convert_csv_file_to_parquet(local_path, parquet_path, verbose=VERBOSE)
+                rr.parquet_path = str(parquet_path)
+                rr.status = "converted"
+            except Exception as e:
+                rr.status = "error"
+                rr.note = f"convert_csv failed: {e}"
+            finally:
+                # Borrado solo si EPHEMERAL y no estamos en skip-download
+                if EPHEMERAL and (not SKIP_DOWNLOAD):
+                    _cleanup_file(local_path)
+                    rr.local_path = ""
+                    if rr.status == "converted":
+                        rr.note = (rr.note + " | ephemeral: source deleted").strip(" |")
 
         elif rr.format == "ZIP":
-            # Descomprimir y convertir cada CSV interno
-            with zipfile.ZipFile(local_path, "r") as z:
-                namelist = z.namelist()
-                csv_entries = [n for n in namelist if n.lower().endswith(".csv")]
-                if not csv_entries:
-                    rr.status = "error"
-                    rr.note = "ZIP sin CSV interno"
-                    return rr
+            try:
+                with zipfile.ZipFile(local_path, "r") as z:
+                    namelist = z.namelist()
+                    csv_entries = [n for n in namelist if n.lower().endswith(".csv")]
+                    if not csv_entries:
+                        rr.status = "error"
+                        rr.note = "ZIP sin CSV interno"
+                        if EPHEMERAL and (not SKIP_DOWNLOAD):
+                            _cleanup_file(local_path)
+                            rr.local_path = ""
+                        return rr
 
-                for name in csv_entries:
-                    with z.open(name) as f:
-                        data = f.read()
-                    inner_csv = tmp_dir / safe_filename(Path(name).name)
-                    with open(inner_csv, "wb") as fout:
-                        fout.write(data)
-                    parquet_name = safe_filename(Path(name).stem) + ".parquet"
-                    parquet_path = out_dir / parquet_name
-                    convert_csv_file_to_parquet(inner_csv, parquet_path)
+                    for name in csv_entries:
+                        with z.open(name) as f:
+                            data = f.read()
+                        inner_csv = tmp_dir / safe_filename(Path(name).name)
+                        with open(inner_csv, "wb") as fout:
+                            fout.write(data)
+                        parquet_name = safe_filename(Path(name).stem) + ".parquet"
+                        parquet_path = out_dir / parquet_name
+                        try:
+                            convert_csv_file_to_parquet(inner_csv, parquet_path, verbose=VERBOSE)
+                        finally:
+                            if EPHEMERAL and (not SKIP_DOWNLOAD):
+                                _cleanup_file(inner_csv)
 
-                rr.parquet_path = str(out_dir)
-                rr.status = "converted"
+                    rr.parquet_path = str(out_dir)
+                    rr.status = "converted"
+            except Exception as e:
+                rr.status = "error"
+                rr.note = f"zip/convert failed: {e}"
+            finally:
+                if EPHEMERAL and (not SKIP_DOWNLOAD):
+                    _cleanup_file(local_path)
+                    rr.local_path = ""
+                    if rr.status == "converted":
+                        rr.note = (rr.note + " | ephemeral: source deleted").strip(" |")
         else:
             rr.status = "error"
-            rr.note = "Formato no soportado"
+            rr.note = f"Formato no soportado: {rr.format}"
 
         return rr
 
@@ -410,10 +559,12 @@ def process_resource(rr: ResourceRow, out_dir: Path, tmp_dir: Path, overwrite=Fa
 
 
 # ---------------------------
-# 5) Programa principal
+# 6) Programa principal
 # ---------------------------
 
 def main():
+    global VERBOSE, EPHEMERAL, SKIP_DOWNLOAD, log
+
     ap = argparse.ArgumentParser(
         description="Localiza recursos CSV/ZIP en datos.madrid.es (vía catálogo o rastreo), guarda enlaces y convierte a Parquet."
     )
@@ -424,14 +575,45 @@ def main():
     ap.add_argument("--out-dir", type=str, default="parquet_out",
                     help="Directorio de salida para Parquet.")
     ap.add_argument("--tmp-dir", type=str, default="tmp_downloads",
-                    help="Directorio temporal de descargas.")
-    ap.add_argument("--max-pages", type=int, default=1500,
+                    help="Directorio temporal/local de trabajo (descargas o ficheros existentes).")
+    ap.add_argument("--max-pages", type=int, default=2000,
                     help="Límite de páginas para el crawler.")
     ap.add_argument("--overwrite", action="store_true",
                     help="Re-descargar y re-convertir aunque existan archivos.")
     ap.add_argument("--inventory-csv", type=str, default="inventory_links.csv",
                     help="Ruta del inventario consolidado (enlaces, estados, rutas locales).")
+    ap.add_argument("--verbose", action="store_true",
+                    help="Imprimir progreso detallado y errores durante la conversión.")
+    ap.add_argument("--log-file", type=str,
+                    help="Ruta de archivo para guardar el log de ejecución.")
+    ap.add_argument("--ephemeral", action="store_true",
+                    help="No conservar descargas: usar solo tmp-dir y borrar tras convertir.")
+    ap.add_argument("--skip-download", action="store_true",
+                    help="Saltar la descarga y convertir usando ficheros ya presentes en --tmp-dir.")
     args = ap.parse_args()
+
+    VERBOSE = args.verbose
+    EPHEMERAL = args.ephemeral
+    SKIP_DOWNLOAD = args.skip_download
+
+    # Si el usuario pide skip-download, ignoramos borrado efímero por seguridad (no se borra nada local)
+    if SKIP_DOWNLOAD and EPHEMERAL:
+        print("[WARN] --skip-download solicitado: se ignora --ephemeral (no se borrarán ficheros locales).", file=sys.stderr)
+        EPHEMERAL = False
+
+    # --- Configurar logging (consola + archivo opcional)
+    handlers = [logging.StreamHandler(sys.stderr)]
+    if args.log_file:
+        log_path = Path(args.log_file)
+        ensure_dir(log_path.parent)
+        handlers.append(logging.FileHandler(log_path, mode="w", encoding="utf-8"))
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=handlers
+    )
+    log = logging.getLogger(__name__)
 
     out_dir = Path(args.out_dir)
     tmp_dir = Path(args.tmp_dir)
@@ -442,26 +624,24 @@ def main():
 
     # --- Modo catálogo (recomendado)
     if args.catalog_file and Path(args.catalog_file).exists():
-        print(f"[INFO] Cargando catálogo: {args.catalog_file}", file=sys.stderr)
+        log.info(f"[INFO] Cargando catálogo: {args.catalog_file}")
         catalog_pages = load_catalog(Path(args.catalog_file))
 
-        # 1) Si el catálogo ya trajese enlaces directos CSV/ZIP, úsalo
         direct = [r for r in catalog_pages if r.format in ("CSV", "ZIP")]
         if direct:
-            print(f"[INFO] Encontrados {len(direct)} enlaces directos CSV/ZIP en el catálogo.", file=sys.stderr)
+            log.info(f"[INFO] Encontrados {len(direct)} enlaces directos CSV/ZIP en el catálogo.")
             resources = direct
         else:
-            # 2) Si no, visitar las páginas y extraer los enlaces reales
-            print("[INFO] No hay enlaces directos a CSV/ZIP en el catálogo. Explorando páginas…", file=sys.stderr)
+            log.info("[INFO] No hay enlaces directos a CSV/ZIP en el catálogo. Explorando páginas…")
             page_resources = extract_csv_zip_from_pages(catalog_pages, same_host=True)
-            print(f"[INFO] Encontrados {len(page_resources)} enlaces CSV/ZIP tras explorar páginas.", file=sys.stderr)
+            log.info(f"[INFO] Encontrados {len(page_resources)} enlaces CSV/ZIP tras explorar páginas.")
             resources = page_resources
 
     # --- Modo crawler (alternativo/extra)
     if args.start_url:
-        print(f"[INFO] Rastreo desde: {args.start_url}", file=sys.stderr)
+        log.info(f"[INFO] Rastreo desde: {args.start_url}")
         crawl_rows = crawl_for_links(args.start_url, max_pages=args.max_pages)
-        print(f"[INFO] Crawler encontró {len(crawl_rows)} enlaces CSV/ZIP.", file=sys.stderr)
+        log.info(f"[INFO] Crawler encontró {len(crawl_rows)} enlaces CSV/ZIP.")
         resources.extend(crawl_rows)
 
     # De-duplicar por URL
@@ -471,10 +651,10 @@ def main():
     resources = list(dedup.values())
 
     if not resources:
-        print("[WARN] No se encontraron recursos CSV/ZIP. Asegúrate de pasar --catalog-file o --start-url.", file=sys.stderr)
+        log.warning("[WARN] No se encontraron recursos CSV/ZIP. Asegúrate de pasar --catalog-file o --start-url.")
         sys.exit(1)
 
-    print(f"[INFO] Recursos a procesar: {len(resources)}", file=sys.stderr)
+    log.info(f"[INFO] Recursos a procesar: {len(resources)}")
 
     results = []
     for rr in tqdm(resources, desc="Procesando recursos", unit="res"):
@@ -485,8 +665,8 @@ def main():
     inv_path = Path(args.inventory_csv)
     df_inv = pd.DataFrame([asdict(r) for r in results])
     df_inv.to_csv(inv_path, index=False, encoding="utf-8")
-    print(f"[OK] Inventario escrito en: {inv_path}")
-    print(f"[OK] Parquet en: {out_dir.resolve()}")
+    log.info(f"[OK] Inventario escrito en: {inv_path}")
+    log.info(f"[OK] Parquet en: {out_dir.resolve()}")
 
 
 if __name__ == "__main__":
