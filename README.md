@@ -1,5 +1,12 @@
 # Proyecto de mejora del Portal de Datos Abiertos del Ayuntamiento de Madrid
 
+## Mejora de la web
+
+- Incorporar códigos de ejemplo en Python y R.
+- Exportar datos a parquet y usar duckDB.
+- Abrir una página de Github.
+- Incorporar datos en Kaggle.
+
 [![CI](https://github.com/santiagomota/madrid-open-data-mejora/actions/workflows/validate.yml/badge.svg)](https://github.com/santiagomota/madrid-open-data-mejora/actions/workflows/validate.yml)
 
 **Autor:** Santiago Mota
