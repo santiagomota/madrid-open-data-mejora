@@ -1,5 +1,7 @@
 # Proyecto de mejora del Portal de Datos Abiertos del Ayuntamiento de Madrid
 
+**Autor:** Santiago Mota
+
 ## Mejora de la web
 
 - Incorporar códigos de ejemplo en Python y R.
@@ -9,9 +11,42 @@
 
 **[madrid_csv_to_parquet.py](/media/enero/Disco3ATA/Varios/R/Archivos/datos_madrid/madrid_csv_to_parquet.py) para convertir todos los csv a parquet**
 
-[![CI](https://github.com/santiagomota/madrid-open-data-mejora/actions/workflows/validate.yml/badge.svg)](https://github.com/santiagomota/madrid-open-data-mejora/actions/workflows/validate.yml)
+Ejemplos de uso
 
-**Autor:** Santiago Mota
+A) Procesar todo lo que ya existe en tmp_downloads (sin tocar la red):
+
+python madrid_csv_to_parquet.py \
+  --from-tmp \
+  --tmp-dir tmp_downloads \
+  --out-dir parquet_out \
+  --inventory-csv inventario_madrid.csv \
+  --skip-download \
+  --verbose \
+  --log-file logs/ejecucion_madrid.log
+
+B) Rastrear + descargar + convertir (flujo completo):
+
+python madrid_csv_to_parquet.py \
+  --start-url https://datos.madrid.es \
+  --out-dir parquet_out \
+  --tmp-dir tmp_downloads \
+  --inventory-csv inventario_madrid.csv \
+  --verbose \
+  --log-file logs/ejecucion_madrid.log
+
+C) Efímero (descarga, convierte y borra originales):
+
+python madrid_csv_to_parquet.py \
+  --start-url https://datos.madrid.es \
+  --out-dir parquet_out \
+  --tmp-dir tmp_downloads \
+  --inventory-csv inventario_madrid.csv \
+  --ephemeral \
+  --verbose \
+  --log-file logs/ejecucion_madrid.log
+
+
+[![CI](https://github.com/santiagomota/madrid-open-data-mejora/actions/workflows/validate.yml/badge.svg)](https://github.com/santiagomota/madrid-open-data-mejora/actions/workflows/validate.yml)
 
 Este repositorio forma parte de la propuesta para la categoría **"Mejora de la calidad del portal"** de los Premios a la Reutilización de Datos Abiertos (2025).
 
