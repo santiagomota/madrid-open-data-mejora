@@ -45,3 +45,5 @@ leaflet(df_map) |>
                                    "<br><b>intensidad:</b> ", intensidad,
                                    "<br><b>ocupación:</b> ", ocupacion,
                                    "<br><b>punto:</b> ", descripcion))
+
+dbDisconnect(con)

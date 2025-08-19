@@ -119,3 +119,5 @@ res <- dbGetQuery(con, sprintf("SELECT COUNT(*) AS filas, min(ts) AS ts_min, max
 print(res)
 
 message(sprintf("Tabla '%s' creada/actualizada y ordenada por ts en %s", tabla, duckdb_path))
+
+dbDisconnect(con)

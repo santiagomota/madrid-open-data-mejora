@@ -49,3 +49,5 @@ top10 <- dplyr::tbl(con, dplyr::sql(sprintf("
 ", tcol_sql, src_name, tcol_sql))) %>% collect()
 
 print(top10)
+
+dbDisconnect(con)

@@ -47,3 +47,5 @@ print(resumen)
 
 arrow::write_parquet(resumen, file.path(out_dir, "resumen_diario.parquet"))
 write.csv(resumen, file.path(out_dir, "resumen_diario.csv"), row.names = FALSE)
+
+dbDisconnect(con)

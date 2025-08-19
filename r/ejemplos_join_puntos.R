@@ -29,3 +29,5 @@ enriq <- traf %>%
   collect()
 
 print(enriq, n = 20)
+
+dbDisconnect(con)

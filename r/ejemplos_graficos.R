@@ -40,3 +40,5 @@ ggplot(topn, aes(x = reorder(as.factor(idelem), imedia), y = imedia)) +
   coord_flip() +
   labs(title = "Top 15 puntos por intensidad media (última hora)",
        x = "idelem", y = "Intensidad media")
+
+dbDisconnect(con)
