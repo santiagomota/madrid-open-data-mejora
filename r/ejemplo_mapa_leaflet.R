@@ -9,8 +9,17 @@ duckdb_path <- "data/duckdb/madrid.duckdb"
 con <- DBI::dbConnect(duckdb::duckdb(), duckdb_path)
 on.exit({ try(DBI::dbDisconnect(con, shutdown = TRUE), silent = TRUE) })
 
+DBI::dbListTables(con)
+# [1] "trafico_2025_07"
+
 src_name <- if ("v_trafico_enriquecido" %in% DBI::dbListTables(con)) "v_trafico_enriquecido" else "trafico_2025_07"
 fields <- DBI::dbListFields(con, src_name)
+
+fields
+# [1] "id"                  "fecha"               "tipo_elem"          
+# [4] "intensidad"          "ocupacion"           "carga"              
+# [7] "vmed"                "error"               "periodo_integracion"
+# [10] "ts"   
 
 pos_x <- intersect(fields, c("st_x", "lon", "long", "longitude"))
 pos_y <- intersect(fields, c("st_y", "lat", "latitude"))
