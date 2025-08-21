@@ -2,6 +2,7 @@
 
 **Autor:** Santiago Mota
 
+
 ## Mejora de la web
 
 - Incorporar códigos de ejemplo en Python y R.
@@ -48,6 +49,7 @@ El objetivo es demostrar, mediante ejemplos prácticos, cómo implementar mejora
 4. **Validación automática** de datasets.
 5. Herramientas para facilitar el uso (Makefile y vistas SQL).
 
+
 ## Estructura del repositorio
 
 ```
@@ -68,6 +70,7 @@ sql/            # Vistas y consultas SQL para DuckDB
 - `make` (opcional, para automatizar tareas).
 - Conexión a Internet para descargar los datos del portal.
 
+
 ## Uso rápido
 
 ```bash
@@ -86,7 +89,9 @@ make demo-realtime
 make validate-realtime
 ```
 
+
 ### Referencias de los datasets utilizados
+
 - **Tráfico en tiempo real (XML):** https://datos.madrid.es/egob/catalogo/202087-0-trafico-intensidad.xml
 - **Puntos de medida (CSV, 2025-07):** https://datos.madrid.es/egob/catalogo/202468-263-intensidad-trafico.csv
 
