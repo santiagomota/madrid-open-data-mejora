@@ -6,11 +6,11 @@
 ## Mejora de la web
 
 - Incorporar códigos de ejemplo en Python y R.
-- Exportar datos a parquet y usar duckDB.
+- Exportar datos a `parquet` y usar duckDB.
 - Abrir una página de Github.
 - Incorporar datos en Kaggle (crear un usuario para el ayuntamiento, con ejemplos).
 
-**[madrid_csv_to_parquet.py](/media/enero/Disco3ATA/Varios/R/Archivos/datos_madrid/madrid_csv_to_parquet.py) para convertir todos los csv a parquet**
+**[madrid_csv_to_parquet.py](https://github.com/santiagomota/madrid-open-data-mejora/blob/main/python/madrid_csv_to_parquet.py) para convertir todos los csv a parquet**
 
 Ejemplos de uso
 
