@@ -45,7 +45,7 @@ Este repositorio forma parte de la propuesta para la categoría **"Mejora de la 
 El objetivo es demostrar, mediante ejemplos prácticos, cómo implementar mejoras concretas en:
 1. Ejemplos de uso en **R** y **Python**.
 2. Integración directa con **DuckDB**.
-3. Uso de **formatos abiertos** (CSV, JSON, Parquet, GeoParquet).
+3. Uso de **formatos abiertos** (`CSV`, `JSON`, `Parquet`, `GeoParquet`).
 4. **Validación automática** de datasets.
 5. Herramientas para facilitar el uso (Makefile y vistas SQL).
 
